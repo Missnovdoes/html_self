@@ -82,13 +82,11 @@
       </div>
       <div class="bg-white rounded-lg shadow p-6 flex flex-col items-center justify-center">
         <h2 class="text-xl font-semibold text-gray-700 mb-4 text-center">前往标注工作台</h2>
-        <a href="http://127.0.0.1:5000/" target="_blank"
-          class="bg-green-500 text-white px-6 py-3 rounded hover:bg-green-600 transition text-center block w-full text-center">
-          打开本地标注工作台
+        <a href="https://c-group-workbench.com" target="_blank"
+          class="bg-green-500 text-white px-6 py-3 rounded hover:bg-green-600 transition text-center">
+          打开C组工作台
         </a>
-        <p class="mt-3 text-sm text-gray-500 text-center">
-          请确保本地服务（ReID 标注助手）正在运行
-        </p>
+        <p class="mt-3 text-sm text-gray-500 text-center">（实际使用时替换为C组真实链接）</p>
       </div>
     </section>
   </div>
@@ -110,46 +108,77 @@
     const API_AUTH_TOKEN = "Bearer dfd7dea6-f189-4e18-a352-23d25a447e96";
     const MODEL_NAME = "doubao-1-5-vision-pro-32k-250115"; // 固定使用豆包模型
     const DATASET_NAME = "image"; // 固定使用image数据集
+    
+    // HTTP Request 请求体格式（参考）:
+    // {
+    //   "model": "doubao-1-5-vision-pro-32k-250115",
+    //   "messages": [
+    //     {
+    //       "role": "user",
+    //       "content": [
+    //         {
+    //           "type": "image_url",
+    //           "image_url": {
+    //             "url": "https://jvewcwakqrgmdquutxpo.supabase.co/storage/v1/object/public/image/{{ $json.image_url }}"
+    //           }
+    //         },
+    //         {
+    //           "type": "text",
+    //           "text": "This image features a {{ $json.gender }} person with {{ $json.hair_length }} {{ $json.hair_color }} hair..."
+    //         }
+    //       ]
+    //     }
+    //   ]
+    // }
+    // ============================================
 
-    // 初始化 Supabase 客户端
+    // ✅ 正确初始化 Supabase 客户端（变量名不能叫 supabase）
     const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
     // ---------------- 触发标注流程 ----------------
     document.getElementById("taskForm").addEventListener("submit", async (e) => {
       e.preventDefault();
+      const model = MODEL_NAME; // 固定使用豆包模型
+      const dataset = DATASET_NAME; // 固定使用image数据集
+
       const taskMsgEl = document.getElementById("taskMsg");
 
       try {
         console.log("Calling n8n webhook:", N8N_WEBHOOK_URL);
+
+        // 直接触发n8n webhook，流程会自动执行：Get many rows (images) → HTTP Request → Create a row (annotations)
         const response = await fetch(N8N_WEBHOOK_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model: MODEL_NAME, dataset: DATASET_NAME }),
+          body: JSON.stringify({ model, dataset }),
         });
 
         if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
 
+        // 成功提示
         taskMsgEl.classList.remove("hidden");
         setTimeout(() => taskMsgEl.classList.add("hidden"), 3000);
-        loadAnnotations(); // 自动刷新
+        loadAnnotations(); // 自动刷新标注结果列表
       } catch (err) {
         console.error("流程触发失败:", err);
         alert("流程触发失败：\n" + err.message + "\n\n请确认 n8n 是否在运行");
       }
     });
 
-    // ---------------- 加载标注结果列表 ----------------
+    // ---------------- 加载标注结果列表（从annotations表读取） ----------------
     async function loadAnnotations() {
       const tableBody = document.getElementById("taskTableBody");
       tableBody.innerHTML =
         '<tr><td colspan="3" class="border border-gray-300 p-4 text-center text-gray-500">加载中...</td></tr>';
 
       try {
+        // 从annotations表读取数据（Create a row节点写入的结果）
+        // 查询字段：task, image, created_at
         const { data, error } = await supabaseClient
           .from(ANNOTATIONS_TABLE)
           .select("task, image, created_at")
           .order("created_at", { ascending: false })
-          .limit(100);
+          .limit(100); // 限制显示最新100条
 
         if (error) throw error;
 
@@ -178,11 +207,12 @@
       }
     }
 
-    // ---------------- 加载图表 ----------------
+    // ---------------- 加载图表（基于annotations表统计） ----------------
     async function loadResultChart() {
       const ctx = document.getElementById("resultChart").getContext("2d");
 
       try {
+        // 从annotations表读取数据进行统计
         const { data, error } = await supabaseClient
           .from(ANNOTATIONS_TABLE)
           .select("created_at")
@@ -190,51 +220,64 @@
 
         if (error) throw error;
 
+        // 按时间（时:分）统计标注数量
         const timeCount = {};
         (data || []).forEach((item) => {
           if (item.created_at) {
             const date = new Date(item.created_at);
+            // 格式化为 时:分 (例如: 14:30)
             const timeKey = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
             timeCount[timeKey] = (timeCount[timeKey] || 0) + 1;
           }
         });
 
+        // 准备标签和数值，并按时间顺序排序
         let labels = Object.keys(timeCount);
         let values = Object.values(timeCount);
 
+        // 如果没有数据，显示空状态
         if (labels.length === 0) {
           labels = ["暂无数据"];
           values = [0];
         } else {
+          // 按时间排序（时:分格式可以直接字符串比较）
           const sortedEntries = labels.map((label, index) => [label, values[index]])
             .sort((a, b) => a[0].localeCompare(b[0]));
           labels = sortedEntries.map(entry => entry[0]);
           values = sortedEntries.map(entry => entry[1]);
         }
 
+        // 销毁旧图表（防止重复绘制）
         Chart.getChart("resultChart")?.destroy();
 
         new Chart(ctx, {
           type: "bar",
           data: {
             labels: labels,
-            datasets: [{
-              label: "标注数量",
-              data: values,
-              backgroundColor: "#3b82f6",
-              borderRadius: 4,
-              borderSkipped: false,
-            }],
+            datasets: [
+              {
+                label: "标注数量",
+                data: values,
+                backgroundColor: "#3b82f6",
+                borderRadius: 4,
+                borderSkipped: false,
+              },
+            ],
           },
           options: {
             responsive: true,
             maintainAspectRatio: false,
-            plugins: { legend: { display: true } },
+            plugins: {
+              legend: { display: true },
+            },
             scales: {
               y: {
                 beginAtZero: true,
                 title: { display: true, text: "标注数量" },
-                ticks: { stepSize: 1, precision: 0 }
+                ticks: {
+                  stepSize: 1, // y轴每步显示1个
+                  precision: 0
+                }
               },
               x: {
                 title: { display: true, text: "时间（时:分）" },
@@ -261,4 +304,5 @@
   </script>
 </body>
 </html>
+
 
